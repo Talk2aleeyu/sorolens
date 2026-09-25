@@ -13,10 +13,12 @@ import type {
   InvocationsResponse,
   MonitoredContract,
   MonitoredContractsResponse,
+  ReportFormat,
   StatsResponse,
   StorageResponse,
   TimeWindow,
   TrackContractRequest,
+  SLAHistoryResponse,
   UptimeResponse,
   UptimeWindow,
   WatchdogStats,
@@ -153,6 +155,37 @@ export function getContractInvocations(
   );
 }
 
+// ---- global invocations ----------------------------------------------------
+
+/**
+ * Lists invocations across every tracked contract (newest first). Backs the
+ * /invocations explorer. All filters are optional.
+ */
+export function listInvocations(params?: {
+  cursor?: string;
+  limit?: number;
+  contract_id?: string;
+  fn?: string;
+  status?: string;
+  network?: string;
+  since?: string;
+  until?: string;
+}): Promise<InvocationsResponse> {
+  const search = new URLSearchParams();
+  if (params?.cursor) search.set("cursor", params.cursor);
+  if (params?.limit) search.set("limit", String(params.limit));
+  if (params?.contract_id) search.set("contract_id", params.contract_id);
+  if (params?.fn) search.set("fn", params.fn);
+  if (params?.status) search.set("status", params.status);
+  if (params?.network) search.set("network", params.network);
+  if (params?.since) search.set("since", params.since);
+  if (params?.until) search.set("until", params.until);
+  const qs = search.toString();
+  return fetchJson<InvocationsResponse>(
+    `${API_URL}/api/v1/invocations${qs ? "?" + qs : ""}`,
+  );
+}
+
 export function getContractStorage(
   id: string,
   params?: {
@@ -265,6 +298,50 @@ export function getMonitoredContract(
   return fetchJson<MonitoredContract>(
     `${API_URL}/api/v1/watchdog/contracts/${contractId}`,
   );
+}
+
+export function getContractUptime(
+  contractId: string,
+  window: UptimeWindow = "24h",
+): Promise<UptimeResponse> {
+  return fetchJson<UptimeResponse>(
+    `${API_URL}/api/v1/watchdog/contracts/${contractId}/uptime?window=${window}`,
+  );
+}
+
+// ---- SLA reporting (issue #266) --------------------------------------------
+
+/**
+ * Monthly SLA buckets for the last `months` calendar months, oldest first.
+ * Backs the trend chart in one round-trip instead of a request per month.
+ */
+export function getContractReportHistory(
+  contractId: string,
+  months = 12,
+): Promise<SLAHistoryResponse> {
+  const search = new URLSearchParams({ months: String(months) });
+  return fetchJson<SLAHistoryResponse>(
+    `${API_URL}/api/v1/reports/${contractId}/history?${search.toString()}`,
+  );
+}
+
+/**
+ * URL for a report export. Returned rather than fetched so the browser can
+ * follow it as a download and honour Content-Disposition.
+ */
+export function contractReportUrl(
+  contractId: string,
+  month: string,
+  format: ReportFormat,
+): string {
+  const search = new URLSearchParams({ month, format });
+  return `${API_URL}/api/v1/reports/${contractId}?${search.toString()}`;
+}
+
+/** URL of the embeddable SVG SLA badge for a month. */
+export function contractSLABadgeUrl(contractId: string, month: string): string {
+  const search = new URLSearchParams({ month });
+  return `${API_URL}/api/v1/reports/${contractId}/badge.svg?${search.toString()}`;
 }
 
 export function listHealthChecks(

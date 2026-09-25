@@ -2,6 +2,7 @@ package router
 
 import (
 	"net/http"
+	"net/http/pprof"
 
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
@@ -13,7 +14,9 @@ import (
 )
 
 // New builds and returns the HTTP router with all middleware and routes wired.
-func New(h *handler.Handler) http.Handler {
+// maxBodyBytes caps the request body size in bytes; values of zero or less
+// disable the limit. Callers normally pass cfg.RequestMaxBodyBytes.
+func New(h *handler.Handler, maxBodyBytes int64) http.Handler {
 	r := chi.NewRouter()
 
 	// Global middleware
@@ -22,8 +25,14 @@ func New(h *handler.Handler) http.Handler {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.CORS)
 	r.Use(middleware.Recoverer(h.Logger))
+	r.Use(middleware.BodyLimit(maxBodyBytes))
 	r.Use(middleware.Logger(h.Logger))
 	r.Use(chiMiddleware.StripSlashes)
+
+	// Emit ETags on cacheable GET/HEAD responses and answer If-None-Match
+	// matches with an empty 304, short-circuiting the body before it
+	// crosses the wire (issue #152).
+	r.Use(middleware.ETag)
 
 	r.Use(middleware.RateLimit(h.RedisClient, h.Store))
 
@@ -42,6 +51,16 @@ func New(h *handler.Handler) http.Handler {
 	// form-encoded bodies, which the JSON content-type guard would reject;
 	// every request is authenticated by its Slack signature instead.
 	r.Post("/integrations/slack/commands", h.SlackCommand)
+
+	// pprof (issue #157). Gated behind admin role so probing always gets 403
+	// rather than 401, avoiding path enumeration by unauthenticated callers.
+	adminOnly := middleware.RequireRoleOrForbidden(h.Store, h.Logger, middleware.RoleAdmin)
+	r.With(adminOnly).HandleFunc("/debug/pprof", pprof.Index)
+	r.With(adminOnly).HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	r.With(adminOnly).HandleFunc("/debug/pprof/profile", pprof.Profile)
+	r.With(adminOnly).HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	r.With(adminOnly).HandleFunc("/debug/pprof/trace", pprof.Trace)
+	r.With(adminOnly).HandleFunc("/debug/pprof/{name}", pprof.Index)
 
 	// API v1
 	r.Route("/api/v1", func(r chi.Router) {
@@ -74,6 +93,13 @@ func New(h *handler.Handler) http.Handler {
 		// Cross-contract events explorer feed (issue #97).
 		get("/events", h.ListAllEvents)
 
+		// Alert deduplication and grouping engine (issue #269).
+		// GET /api/v1/alerts          — grouped view (default)
+		// GET /api/v1/alerts?flat=true — raw ContractAlert feed
+		get("/alerts", h.ListAlerts)
+		// Search contracts (issue #181)
+		get("/search", h.SearchContracts)
+
 		// Cross-contract comparison (issue #324): one round-trip that fans
 		// out to the per-contract stats/health lookups in parallel.
 		get("/compare", h.CompareContracts)
@@ -85,6 +111,8 @@ func New(h *handler.Handler) http.Handler {
 		r.With(scope, cacheContracts).Get("/contracts/{id}", h.GetContract)
 		get("/contracts/{id}/events", h.ListEvents)
 		get("/contracts/{id}/invocations", h.ListInvocations)
+		// Global invocation explorer: resource usage across every contract.
+		get("/invocations", h.ListAllInvocations)
 		get("/contracts/{id}/storage", h.ListStorageEntries)
 		get("/contracts/{id}/stats", h.ContractStats)
 		get("/contracts/{id}/forecast", h.ContractForecast)
@@ -95,7 +123,6 @@ func New(h *handler.Handler) http.Handler {
 		get("/contracts/{id}/stream", h.StreamEvents)
 		get("/contracts/{id}/graph", h.ContractGraph)
 		get("/stream/events", h.StreamEventsSSE)
-
 
 		// API keys (admin scope + admin role).
 		r.With(scope, admin).Get("/api-keys", h.ListAPIKeys)
@@ -127,6 +154,15 @@ func New(h *handler.Handler) http.Handler {
 		get("/watchdog/contracts/{id}", h.GetMonitoredContract)
 		get("/watchdog/contracts/{id}/health", h.ListHealthChecks)
 		get("/watchdog/contracts/{id}/alerts", h.ListWatchdogAlerts)
+		get("/watchdog/contracts/{id}/uptime", h.GetContractUptime)
+
+		// Monthly SLA and uptime reporting (issue #266). Reports are derived
+		// from the watchdog health checks and alerts already stored, so there
+		// is no new ingestion path. The badge is plain SVG so it can be
+		// embedded in a README without a client library.
+		get("/reports/{contract_id}", h.GetContractReport)
+		get("/reports/{contract_id}/history", h.GetContractReportHistory)
+		get("/reports/{contract_id}/badge.svg", h.GetContractSLABadge)
 
 		// Alert notification subscriptions (issue #127). They hold
 		// integration secrets, so reading them also needs contributor.
